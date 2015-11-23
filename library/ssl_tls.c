@@ -374,7 +374,7 @@ static int tls_prf_generic( mbedtls_md_type_t md_type,
 {
     size_t nb;
     size_t i, j, k, md_len;
-    unsigned char tmp[128];
+    unsigned char tmp[192];
     unsigned char h_i[MBEDTLS_MD_MAX_SIZE];
     const mbedtls_md_info_t *md_info;
     mbedtls_md_context_t md_ctx;
@@ -525,6 +525,7 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
     if( ssl->minor_ver == MBEDTLS_SSL_MINOR_VERSION_0 )
     {
         handshake->tls_prf = ssl3_prf;
+        session->tls_prf = ssl3_prf;
         handshake->calc_verify = ssl_calc_verify_ssl;
         handshake->calc_finished = ssl_calc_finished_ssl;
     }
@@ -534,6 +535,7 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
     if( ssl->minor_ver < MBEDTLS_SSL_MINOR_VERSION_3 )
     {
         handshake->tls_prf = tls1_prf;
+        session->tls_prf = tls1_prf;
         handshake->calc_verify = ssl_calc_verify_tls;
         handshake->calc_finished = ssl_calc_finished_tls;
     }
@@ -545,6 +547,7 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
         transform->ciphersuite_info->mac == MBEDTLS_MD_SHA384 )
     {
         handshake->tls_prf = tls_prf_sha384;
+        session->tls_prf = tls_prf_sha384;
         handshake->calc_verify = ssl_calc_verify_tls_sha384;
         handshake->calc_finished = ssl_calc_finished_tls_sha384;
     }
@@ -554,6 +557,7 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
     if( ssl->minor_ver == MBEDTLS_SSL_MINOR_VERSION_3 )
     {
         handshake->tls_prf = tls_prf_sha256;
+        session->tls_prf = tls_prf_sha256;
         handshake->calc_verify = ssl_calc_verify_tls_sha256;
         handshake->calc_finished = ssl_calc_finished_tls_sha256;
     }
@@ -633,6 +637,9 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
         }
 
         mbedtls_zeroize( handshake->premaster, sizeof(handshake->premaster) );
+
+        /* Save randbytes for later use with SRTP */
+        memcpy( session->randbytes, ssl->handshake->randbytes, 64 );
     }
     else
         MBEDTLS_SSL_DEBUG_MSG( 3, ( "no premaster (session resumed)" ) );
@@ -951,6 +958,63 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
     MBEDTLS_SSL_DEBUG_MSG( 2, ( "<= derive keys" ) );
 
     return( 0 );
+}
+
+int mbedtls_ssl_export_srtp_keys( mbedtls_ssl_context *ssl, uint8_t* key_buffer, uint16_t key_buffer_size )
+{
+    int ret = 0;
+    unsigned int actual_buffer_size = 2 * (MBEDTLS_SSL_SRTP_MASTER_KEY_LEN + MBEDTLS_SSL_SRTP_MASTER_SALT_LEN);    // RFC 5764: Key buffer size for all currently valid SRTP protection profiles
+    uint8_t* clientKey;
+    uint8_t* serverKey;
+    uint8_t* clientSalt;
+    uint8_t* serverSalt;
+
+    mbedtls_ssl_session *session = ssl->session;
+
+    MBEDTLS_SSL_DEBUG_MSG( 2, ( "=> export SRTP keys" ) );
+
+    if( session == NULL )
+    {
+        MBEDTLS_SSL_DEBUG_MSG( 1, ( "DTLS session not fully negotiated" ) );
+        return( MBEDTLS_ERR_SSL_INTERNAL_ERROR );
+    }
+    if( session->tls_prf == NULL )
+    {
+        MBEDTLS_SSL_DEBUG_MSG( 1, ( "PRF function not assigned" ) );
+        return( MBEDTLS_ERR_SSL_INTERNAL_ERROR );
+    }
+    if( actual_buffer_size < key_buffer_size )
+    {
+        MBEDTLS_SSL_DEBUG_MSG( 1, ( "Allocated buffer for SRTP keys to small" ) );
+        return( MBEDTLS_ERR_SSL_INTERNAL_ERROR );
+    }
+
+    MBEDTLS_SSL_DEBUG_MSG( 3, ( "label %s, size %d", "EXTRACTOR-dtls_srtp", sizeof("EXTRACTOR-dtls_srtp") - 1 ) );
+    MBEDTLS_SSL_DEBUG_BUF( 3, "random values client + server ", session->randbytes, 64 );
+    MBEDTLS_SSL_DEBUG_BUF( 3, "master secret ", session->master, 48 );
+    ret = session->tls_prf( session->master, 48,
+            "EXTRACTOR-dtls_srtp",
+            session->randbytes, 64,
+            key_buffer, actual_buffer_size );
+    if( ret != 0 )
+    {
+        MBEDTLS_SSL_DEBUG_RET( 1, "prf", ret );
+        return( ret );
+    }
+    MBEDTLS_SSL_DEBUG_BUF( 3, "SRTP keys client + server", key_buffer, actual_buffer_size );
+
+    clientKey = &key_buffer[0];
+    serverKey = &key_buffer[MBEDTLS_SSL_SRTP_MASTER_KEY_LEN];
+    clientSalt = &key_buffer[2 * MBEDTLS_SSL_SRTP_MASTER_KEY_LEN];
+    serverSalt = &key_buffer[2 * MBEDTLS_SSL_SRTP_MASTER_KEY_LEN + MBEDTLS_SSL_SRTP_MASTER_SALT_LEN];
+    MBEDTLS_SSL_DEBUG_BUF( 3, "SRTP client master key", clientKey, MBEDTLS_SSL_SRTP_MASTER_KEY_LEN );
+    MBEDTLS_SSL_DEBUG_BUF( 3, "SRTP server master key", serverKey, MBEDTLS_SSL_SRTP_MASTER_KEY_LEN );
+    MBEDTLS_SSL_DEBUG_BUF( 3, "SRTP client master salt", clientSalt, MBEDTLS_SSL_SRTP_MASTER_SALT_LEN );
+    MBEDTLS_SSL_DEBUG_BUF( 3, "SRTP server master salt", serverSalt, MBEDTLS_SSL_SRTP_MASTER_SALT_LEN );
+
+    MBEDTLS_SSL_DEBUG_MSG( 2, ( "<= export SRTP keys" ) );
+
+    return( actual_buffer_size );
 }
 
 #if defined(MBEDTLS_SSL_PROTO_SSL3)
@@ -5265,6 +5329,16 @@ void mbedtls_ssl_conf_dbg( mbedtls_ssl_config *conf,
 {
     conf->f_dbg      = f_dbg;
     conf->p_dbg      = p_dbg;
+}
+
+void mbedtls_ssl_set_use_srtp( mbedtls_ssl_context *ssl)
+{
+    ssl->use_srtp = MBEDTLS_SSL_USE_SRTP_ENABLED;
+}
+
+int mbedtls_ssl_get_srtp_profile( mbedtls_ssl_context *ssl)
+{
+    return ssl->srtp_profile;
 }
 
 void mbedtls_ssl_set_bio( mbedtls_ssl_context *ssl,

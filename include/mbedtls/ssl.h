@@ -200,6 +200,20 @@
 #define MBEDTLS_SSL_PRESET_DEFAULT              0
 #define MBEDTLS_SSL_PRESET_SUITEB               2
 
+/* SRTP extension. RFC 5764. */
+#define MBEDTLS_SSL_USE_SRTP_DISABLED           0
+#define MBEDTLS_SSL_USE_SRTP_ENABLED            1
+
+/* SRTP protection profiles */
+#define MBEDTLS_SSL_SRTP_AES128_CM_HMAC_SHA1_80     0x01
+#define MBEDTLS_SSL_SRTP_AES128_CM_HMAC_SHA1_32     0x02
+#define MBEDTLS_SSL_SRTP_NULL_HMAC_SHA1_80          0x05
+#define MBEDTLS_SSL_SRTP_NULL_HMAC_SHA1_32          0x06
+
+/* SRTP key export lengths */
+#define MBEDTLS_SSL_SRTP_MASTER_KEY_LEN         16
+#define MBEDTLS_SSL_SRTP_MASTER_SALT_LEN        14
+
 /*
  * Default range for DTLS retransmission timer value, in milliseconds.
  * RFC 6347 4.2.4.1 says from 1 second to 60 seconds.
@@ -350,6 +364,8 @@
 
 #define MBEDTLS_TLS_EXT_RENEGOTIATION_INFO      0xFF01
 
+#define MBEDTLS_TLS_EXT_USE_SRTP                0x000E
+
 /*
  * Size defines
  */
@@ -449,6 +465,10 @@ struct mbedtls_ssl_session
     size_t id_len;              /*!< session id length  */
     unsigned char id[32];       /*!< session identifier */
     unsigned char master[48];   /*!< the master secret  */
+    unsigned char randbytes[64];/*!< random bytes */
+    int  (*tls_prf)(const unsigned char *, size_t, const char *,
+                     const unsigned char *, size_t,
+                     unsigned char *, size_t);   /*!< saved PRF function selection */
 
 #if defined(MBEDTLS_X509_CRT_PARSE_C)
     mbedtls_x509_crt *peer_cert;        /*!< peer X.509 cert chain */
@@ -787,6 +807,9 @@ struct mbedtls_ssl_context
     char own_verify_data[MBEDTLS_SSL_VERIFY_DATA_MAX_LEN]; /*!<  previous handshake verify data */
     char peer_verify_data[MBEDTLS_SSL_VERIFY_DATA_MAX_LEN]; /*!<  previous handshake verify data */
 #endif
+
+    int use_srtp;               /*!< flag for using SRP extension in DTLS negotiation */
+    int srtp_profile;           /*!< selected SRTP Protection Profile */
 };
 
 #if defined(MBEDTLS_SSL_HW_RECORD_ACCEL)
@@ -971,6 +994,26 @@ void mbedtls_ssl_conf_rng( mbedtls_ssl_config *conf,
 void mbedtls_ssl_conf_dbg( mbedtls_ssl_config *conf,
                   void (*f_dbg)(void *, int, const char *, int, const char *),
                   void  *p_dbg );
+
+/**
+ * \brief          Set use of SRTP extension in DTLS negotiation.
+ *
+ *                 Must be set by both client and server.
+ *
+ * \param ssl      SSL context
+ *
+ * \return         0 on success,
+ */
+void mbedtls_ssl_set_use_srtp( mbedtls_ssl_context *ssl);
+
+/**
+ * \brief          Gets negotiated SRTP profile.
+ *
+ * \param ssl      SSL context
+ *
+ * \return         Selected profile
+ */
+int mbedtls_ssl_get_srtp_profile( mbedtls_ssl_context *ssl);
 
 /**
  * \brief          Set the underlying BIO callbacks for write, read and
@@ -2062,6 +2105,19 @@ const mbedtls_x509_crt *mbedtls_ssl_get_peer_cert( const mbedtls_ssl_context *ss
  */
 int mbedtls_ssl_get_session( const mbedtls_ssl_context *ssl, mbedtls_ssl_session *session );
 #endif /* MBEDTLS_SSL_CLI_C */
+
+/**
+ * \brief          Export SRTP specific keys
+ *
+ * \param ssl      SSL context
+ * \param key_buffer        Buffer for SRTP keying material
+ * \param key_buffer_size   Size of buffer for keying material
+ *
+ * \return         0 if successful, or a specific SSL error code.
+ *
+ * \note           use_srtp extension needs to be enabled for ClientHello and ServerHello.
+ */
+int mbedtls_ssl_export_srtp_keys( mbedtls_ssl_context *ssl, uint8_t* key_buffer, uint16_t key_buffer_size );
 
 /**
  * \brief          Perform the SSL handshake

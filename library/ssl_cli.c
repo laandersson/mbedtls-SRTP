@@ -467,6 +467,50 @@ static void ssl_write_alpn_ext( mbedtls_ssl_context *ssl,
 }
 #endif /* MBEDTLS_SSL_ALPN */
 
+static void ssl_write_use_srtp_ext( mbedtls_ssl_context *ssl,
+                                    unsigned char *buf, size_t *olen )
+{
+    unsigned char *p = buf;
+    size_t srtp_list_size = 4;                   /* Protection profile list size in bytes */
+    size_t srtp_len = 2 + srtp_list_size + 1;    /* Currently 2 profiles are offered + MKI (1) */
+
+
+    if( ssl->use_srtp == MBEDTLS_SSL_USE_SRTP_DISABLED )
+    {
+        *olen = 0;
+        return;
+    }
+
+    MBEDTLS_SSL_DEBUG_MSG( 3, ( "client hello, adding SRTP extension" ) );
+
+    *p++ = (unsigned char)( ( MBEDTLS_TLS_EXT_USE_SRTP >> 8 ) & 0xFF );
+    *p++ = (unsigned char)( ( MBEDTLS_TLS_EXT_USE_SRTP      ) & 0xFF );
+
+    *p++ = (unsigned char)( ( srtp_len >> 8 ) & 0xFF );
+    *p++ = (unsigned char)( ( srtp_len      ) & 0xFF );
+
+    *olen = 4;
+
+    *p++ = (unsigned char)( ( srtp_list_size >> 8 ) & 0xFF );
+    *p++ = (unsigned char)( ( srtp_list_size      ) & 0xFF );
+
+    *p++ = (unsigned char)( ( MBEDTLS_SSL_SRTP_AES128_CM_HMAC_SHA1_80 >> 8 ) & 0xFF );
+    *p++ = (unsigned char)( ( MBEDTLS_SSL_SRTP_AES128_CM_HMAC_SHA1_80      ) & 0xFF );
+    *p++ = (unsigned char)( ( MBEDTLS_SSL_SRTP_AES128_CM_HMAC_SHA1_32 >> 8 ) & 0xFF );
+    *p++ = (unsigned char)( ( MBEDTLS_SSL_SRTP_AES128_CM_HMAC_SHA1_32      ) & 0xFF );
+    /* Null cipher not tested */
+/*   *p++ = (unsigned char)( ( MBEDTLS_SSL_SRTP_NULL_HMAC_SHA1_80 >> 8 ) & 0xFF );
+ *   *p++ = (unsigned char)( ( MBEDTLS_SSL_SRTP_NULL_HMAC_SHA1_80      ) & 0xFF );
+ *   *p++ = (unsigned char)( ( MBEDTLS_SSL_SRTP_NULL_HMAC_SHA1_32 >> 8 ) & 0xFF );
+ *   *p++ = (unsigned char)( ( MBEDTLS_SSL_SRTP_NULL_HMAC_SHA1_32      ) & 0xFF );
+ */
+    *p++ = (unsigned char)( ( 0x00 ) & 0xFF );
+
+    MBEDTLS_SSL_DEBUG_MSG( 3, ( "sending SRTP extension of length %d", srtp_len ) );
+
+    *olen += srtp_len;
+}
+
 /*
  * Generate random bytes for ClientHello
  */
@@ -810,6 +854,10 @@ static int ssl_write_client_hello( mbedtls_ssl_context *ssl )
     ext_len += olen;
 #endif
 
+#if defined(MBEDTLS_SSL_PROTO_DTLS)
+    ssl_write_use_srtp_ext( ssl, p + 2 + ext_len, &olen );
+    ext_len += olen;
+#endif
     /* olen unused if all extensions are disabled */
     ((void) olen);
 
@@ -1069,6 +1117,33 @@ static int ssl_parse_alpn_ext( mbedtls_ssl_context *ssl,
     return( MBEDTLS_ERR_SSL_BAD_HS_SERVER_HELLO );
 }
 #endif /* MBEDTLS_SSL_ALPN */
+
+static int ssl_parse_use_srtp_ext( mbedtls_ssl_context *ssl,
+                                   const unsigned char *buf,
+                                   size_t len )
+{
+    size_t list_size;        /* SRTP protection profile list size in bytes */
+
+    if( ssl->use_srtp == MBEDTLS_SSL_USE_SRTP_DISABLED || len < 4  )
+    {
+        MBEDTLS_SSL_DEBUG_MSG( 1, ( "No SRTP protection profile selected: use_srtp = %d, len =%d", ssl->use_srtp, len ) );
+        return( MBEDTLS_ERR_SSL_BAD_HS_SERVER_HELLO );
+    }
+
+    list_size = ( ( buf[0] << 8 ) | ( buf[1] ) );
+    if( 2 + list_size + 1 != len ||                 /* MKI must not be longer than '1' */
+        list_size % 2 != 0 )
+    {
+        MBEDTLS_SSL_DEBUG_MSG( 1, ( "bad server hello message" ) );
+        return( MBEDTLS_ERR_SSL_BAD_HS_SERVER_HELLO );
+    }
+
+    ssl->srtp_profile = ( ( buf[2] << 8 ) | ( buf[3] ) );
+
+    MBEDTLS_SSL_DEBUG_MSG( 4, ( "SRTP protection profile selected: 0x%0x", ssl->srtp_profile ) );
+
+    return( 0 );
+}
 
 /*
  * Parse HelloVerifyRequest.  Only called after verifying the HS type.
@@ -1530,6 +1605,18 @@ static int ssl_parse_server_hello( mbedtls_ssl_context *ssl )
 
             break;
 #endif /* MBEDTLS_SSL_ALPN */
+
+#if defined(MBEDTLS_SSL_PROTO_DTLS)
+        case MBEDTLS_TLS_EXT_USE_SRTP:
+            MBEDTLS_SSL_DEBUG_MSG( 3, ( "found use_srtp extension" ) );
+
+            if( ( ret = ssl_parse_use_srtp_ext( ssl, ext + 4, ext_size ) ) != 0 )
+            {
+                return( ret );
+            }
+
+            break;
+#endif /* MBEDTLS_SSL_PROTO_DTLS */
 
         default:
             MBEDTLS_SSL_DEBUG_MSG( 3, ( "unknown extension found: %d (ignoring)",
